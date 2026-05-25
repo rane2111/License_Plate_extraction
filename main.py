@@ -1,134 +1,99 @@
-#Import All the Required Libraries
-import json
+# main.py
 import cv2
-from ultralytics import YOLOv10
-import numpy as np
-import math
+from ultralytics import YOLO
 import re
 import os
-import sqlite3
 from datetime import datetime
-from paddleocr import PaddleOCR
+from PIL import Image
+import pytesseract
+from collections import Counter
+from sql import store_recent_ocr  # ✅ import from sql.py
 
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-#Create a Video Capture Object
-cap = cv2.VideoCapture("data/carLicence1.mp4")
-#Initialize the YOLOv10 Model
-model = YOLOv10("weights/best.pt")
-#Initialize the frame count
-count = 0
-#Class Names
-className = ["License"]
-#Initialize the Paddle OCR
-ocr = PaddleOCR(use_angle_cls = True, use_gpu = False)
+# ----------------- Configure pytesseract -----------------
+import shutil
 
+def find_tesseract():
+    """Auto-detect Tesseract executable path."""
+    # Check if tesseract is already on PATH
+    path = shutil.which("tesseract")
+    if path:
+        return path
+    # Common Windows install locations
+    common_paths = [
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        r"C:\Users\{}\AppData\Local\Tesseract-OCR\tesseract.exe".format(os.environ.get("USERNAME", "")),
+        r"C:\Users\{}\anaconda3\envs\cvproj\Library\bin\tesseract.exe".format(os.environ.get("USERNAME", "")),
+    ]
+    for p in common_paths:
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError(
+        "Tesseract not found! Install it from https://github.com/tesseract-ocr/tesseract "
+        "or set pytesseract.pytesseract.tesseract_cmd manually."
+    )
 
+pytesseract.pytesseract.tesseract_cmd = find_tesseract()
 
-def paddle_ocr(frame, x1, y1, x2, y2):
-    frame = frame[y1:y2, x1: x2]
-    result = ocr.ocr(frame, det=False, rec = True, cls = False)
-    text = ""
-    for r in result:
-        #print("OCR", r)
-        scores = r[0][1]
-        if np.isnan(scores):
-            scores = 0
-        else:
-            scores = int(scores * 100)
-        if scores > 60:
-            text = r[0][0]
-    pattern = re.compile('[\W]')
-    text = pattern.sub('', text)
-    text = text.replace("???", "")
-    text = text.replace("O", "0")
-    text = text.replace("粤", "")
-    return str(text)
+# ----------------- Create required folders -----------------
+os.makedirs("crops", exist_ok=True)
+os.makedirs("json", exist_ok=True)
 
+# ----------------- OCR Function -----------------
+def tesseract_ocr(frame, x1, y1, x2, y2, frame_count):
+    pad = 5
+    x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+    x2, y2 = x2 + pad, y2 + pad
+    crop = frame[y1:y2, x1:x2]
+    cv2.imwrite(f"crops/crop_{frame_count}.png", crop)
+    img_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+    pil_img = Image.fromarray(img_rgb)
+    config = r'--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    text = pytesseract.image_to_string(pil_img, config=config)
+    text = re.sub(r'[\W]', '', text).upper().replace("O", "0")
+    return text
 
+# ----------------- Process Video -----------------
+def extract_plates(video_path):
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video not found: {video_path}")
 
-def save_json(license_plates, startTime, endTime):
-    #Generate individual JSON files for each 20-second interval
-    interval_data = {
-        "Start Time": startTime.isoformat(),
-        "End Time": endTime.isoformat(),
-        "License Plate": list(license_plates)
-    }
-    interval_file_path = "json/output_" + datetime.now().strftime("%Y%m%d%H%M%S") + ".json"
-    with open(interval_file_path, 'w') as f:
-        json.dump(interval_data, f, indent = 2)
+    cap = cv2.VideoCapture(video_path)
+    model = YOLO("weights/best.pt")
+    count = 0
+    frame_plate_counter = Counter()
+    start_time = datetime.now()
 
-    #Cummulative JSON File
-    cummulative_file_path = "json/LicensePlateData.json"
-    if os.path.exists(cummulative_file_path):
-        with open(cummulative_file_path, 'r') as f:
-            existing_data = json.load(f)
-    else:
-        existing_data = []
+    plate_pattern = re.compile(r'^[A-Z]{2}[0-9]{2}[A-Z]{2}[0-9]{4}$')
 
-    #Add new intervaal data to cummulative data
-    existing_data.append(interval_data)
-
-    with open(cummulative_file_path, 'w') as f:
-        json.dump(existing_data, f, indent = 2)
-
-    #Save data to SQL database
-    save_to_database(license_plates, startTime, endTime)
-
-
-
-def save_to_database(license_plates, start_time, end_time):
-    conn = sqlite3.connect('licensePlatesDatabase.db')
-    cursor = conn.cursor()
-    for plate in license_plates:
-        cursor.execute('''
-            INSERT INTO LicensePlates(start_time, end_time, license_plate)
-            VALUES (?, ?, ?)
-        ''', (start_time.isoformat(), end_time.isoformat(), plate))
-    conn.commit()
-    conn.close()
-
-
-
-startTime = datetime.now()
-license_plates = set()
-
-
-while True:
-    ret, frame = cap.read()
-    if ret:
-        currentTime = datetime.now()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
         count += 1
-        print(f"Frame Number: {count}")
-        results = model.predict(frame, conf = 0.45)
+        results = model.predict(frame, conf=0.45)
+        frame_plates = set()
         for result in results:
             boxes = result.boxes
             for box in boxes:
-                x1, y1, x2, y2 = box.xyxy[0]
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                classNameInt = int(box.cls[0])
-                clsName = className[classNameInt]
-                conf = math.ceil(box.conf[0]*100)/100
-                #label = f'{clsName}:{conf}'
-                label = paddle_ocr(frame, x1, y1, x2, y2)
-                if label:
-                    license_plates.add(label)
-                textSize = cv2.getTextSize(label, 0, fontScale=0.5, thickness=2)[0]
-                c2 = x1 + textSize[0], y1 - textSize[1] - 3
-                cv2.rectangle(frame, (x1, y1), c2, (255, 0, 0), -1)
-                cv2.putText(frame, label, (x1, y1 - 2), 0, 0.5, [255,255,255], thickness=1, lineType=cv2.LINE_AA)
-        if (currentTime - startTime).seconds >= 20:
-            endTime = currentTime
-            save_json(license_plates, startTime, endTime)
-            startTime = currentTime
-            license_plates.clear()
-        cv2.imshow("Video", frame)
-        if cv2.waitKey(1) & 0xFF == ord('1'):
-            break
-    else:
-        break
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                label = tesseract_ocr(frame, x1, y1, x2, y2, count)
+                if plate_pattern.match(label):
+                    frame_plates.add(label)
+        for plate in frame_plates:
+            frame_plate_counter[plate] += 1
 
+    cap.release()
 
-    
-cap.release()
-cv2.destroyAllWindows()
+    # -----------------
+    # Save only recent OCR entries
+    # -----------------
+    consensus_threshold = 3
+    valid_plates = [p for p, c in frame_plate_counter.items() if c >= consensus_threshold]
+    if valid_plates:
+        start_time = datetime.now().isoformat()
+        end_time = datetime.now().isoformat()
+        ocr_entries = [(start_time, end_time, plate) for plate in valid_plates]
+        store_recent_ocr(ocr_entries)  # ✅ replaces old data with latest
+
+    return True

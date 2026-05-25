@@ -1,4 +1,6 @@
-huggingface-hub
-paddleocr
-paddlepaddle
-db-sqlite3
+streamlit
+opencv-python
+ultralytics
+pytesseract
+Pillow
+pandas
