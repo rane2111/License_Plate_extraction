@@ -89,5 +89,7 @@ Ensure Tesseract is installed and in your environment `PATH`. If not, `main.py` 
 
 **Visualizing Database Records:**
 You can view database tables cleanly using the [Online SQLite Viewer](https://inloop.github.io/sqlite-viewer/).
+
+working demo of project
 <img width="1920" height="1020" alt="Screenshot 2026-05-25 213315" src="https://github.com/user-attachments/assets/78fdfd84-6df2-41d9-8894-62877227fb2d" />
 <img width="1920" height="1020" alt="Screenshot 2026-05-25 215142" src="https://github.com/user-attachments/assets/f800c9ac-10a9-44f9-a113-3dff60034a73" />
